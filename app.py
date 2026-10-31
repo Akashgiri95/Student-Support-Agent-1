@@ -68,8 +68,8 @@ with st.sidebar:
 
 role = st.session_state.get("role")
 if role == "student":
-    tab_chat, tab_profile, tab_memory, tab_trace = st.tabs([
-        "💬 Student support", "👤 My profile", "🧠 Memory", "🔎 Trace & evaluation"])
+    tab_chat, tab_profile, tab_memory = st.tabs([
+        "💬 Student support", "👤 My profile", "🧠 Memory"])
 else:
     st.info("Sign in with a demo student account to continue.")
 
@@ -80,35 +80,37 @@ if role == "student":
     mode = "a1"
     if agent is None or agent.mode != mode:
         agent = st.session_state["agent"] = StudentSupportAgent(user, mode=mode)
-    st.title("Student Support Agent (Assignment 1)")
-    st.caption(f"Signed in as **{user}** · Mode: **Assignment 1 Baseline** · Model: **{agent.llm.name}**")
-    for chat_role, text, _trace in st.session_state["chat"]:
-        with st.chat_message(chat_role):
-            st.write(_policy_wording(text) if chat_role == "assistant" else text)
-    if q := st.chat_input("Ask about fees, scholarships, course changes, or college policies..."):
-        st.session_state["chat"].append(("user", security.redact(q), None))
-        answer, trace = agent.chat(q)
-        st.session_state["chat"].append(("assistant", answer, trace))
-        st.rerun()
-    if agent.pending_elective_confirmation:
-        target = agent.pending_elective_confirmation
-        submit_col, cancel_col = st.columns(2)
-        if submit_col.button(f"Submit request for {target}", type="primary", key="submit_elective_request"):
-            answer, trace = agent.chat("submit")
+
+    with tab_chat:
+        st.title("Student Support Agent (Assignment 1)")
+        st.caption(f"Signed in as **{user}** · Mode: **Assignment 1 Baseline** · Model: **{agent.llm.name}**")
+        for chat_role, text, _trace in st.session_state["chat"]:
+            with st.chat_message(chat_role):
+                st.write(_policy_wording(text) if chat_role == "assistant" else text)
+                if chat_role == "assistant" and _trace:
+                    with st.expander("🔎 View Trace"):
+                        st.json(_policy_wording(_trace))
+        if q := st.chat_input("Ask about fees, scholarships, course changes, or college policies..."):
+            st.session_state["chat"].append(("user", security.redact(q), None))
+            answer, trace = agent.chat(q)
             st.session_state["chat"].append(("assistant", answer, trace))
             st.rerun()
-        if cancel_col.button("Cancel request", key="cancel_elective_request"):
-            answer, trace = agent.chat("cancel")
-            st.session_state["chat"].append(("assistant", answer, trace))
-            st.rerun()
+        if agent.pending_elective_confirmation:
+            target = agent.pending_elective_confirmation
+            submit_col, cancel_col = st.columns(2)
+            if submit_col.button(f"Submit request for {target}", type="primary", key="submit_elective_request"):
+                answer, trace = agent.chat("submit")
+                st.session_state["chat"].append(("assistant", answer, trace))
+                st.rerun()
+            if cancel_col.button("Cancel request", key="cancel_elective_request"):
+                answer, trace = agent.chat("cancel")
+                st.session_state["chat"].append(("assistant", answer, trace))
+                st.rerun()
 
     with tab_profile:
         st.subheader("My profile")
         student = db.get_student(user)
         st.write(f"**Student ID:** {student['student_id']}  \n**Name:** {student['name']}  \n**Programme:** {student['programme']}  \n**Current elective:** {student['elective']}")
-        options = academic.available_electives(student["programme"], student["elective"])
-        st.caption("You can update your contact email here. To change electives, tell Student Support which listed course you want. The system checks the policy window and prior changes; the Programme Office makes the final decision.")
-        st.write("**Other listed electives:** " + (", ".join(options) if options else "No alternatives are listed."))
         with st.form("student_contact_form"):
             email = st.text_input("Contact email", value=student["email"] or "")
             confirmed = st.checkbox("I confirm this is the contact email I want on my student record.")
@@ -123,41 +125,20 @@ if role == "student":
                     db.update_student(user, {"email": email.strip()}, actor=user, source="self_service")
                     security.audit(user, "update_contact_email", user, {"field": "email"},
                                    "ALLOWED", "contact email updated")
-                    st.success("Contact email updated. The Programme Office can see the change in the record history.")
+                    st.success("Contact email updated.")
                     st.rerun()
-
-    with tab_requests:
-        st.subheader("My change requests")
-        requests = db.query(
-            "SELECT approval_id, action, params, status, result, created_at, decided_at "
-            "FROM approvals WHERE student_id=? ORDER BY approval_id DESC", (user,))
-        if not requests:
-            st.info("No requests yet. In Student Support, choose an offered elective, review the eligibility result, then use the Submit request button.")
-        st.caption("To review a pending request, sign out and use Programme Office demo sign-in. The request appears in Approvals and stays pending until staff decide.")
-        for request in requests:
-            params = json.loads(request["params"])
-            with st.container(border=True):
-                st.markdown(f"**Request #{request['approval_id']} · {request['status']}**")
-                st.write(f"{params.get('current_elective', 'Current elective')} → {params.get('new_elective', request['action'])}")
-                st.caption(f"Submitted {request['created_at']}")
-                if request["result"]:
-                    st.write(request["result"])
-
-    with tab_trace:
-        st.subheader("Agent traces")
-        traces = [(text, trace) for chat_role, text, trace in st.session_state["chat"]
-                  if chat_role == "assistant" and trace]
-        if not traces:
-            st.info("Traces for your questions will appear here.")
-        for index, (answer, trace) in enumerate(reversed(traces), start=1):
-            with st.expander(f"Trace {index}: {answer[:80]}"):
-                st.json(_policy_wording(trace))
-        st.caption("Traces show tool calls, retrieved policy evidence, latency, and token usage.")
 
     with tab_memory:
         st.subheader("Your saved memories")
         memories = db.query("SELECT key, value, created_at FROM memories WHERE student_id=? ORDER BY created_at DESC", (user,))
         if not memories:
+            st.info("No saved memories yet. Tell the agent a useful preference or long-term goal to remember.")
+        for item in memories:
+            col1, col2 = st.columns([5, 1])
+            col1.write(f"**{item['key']}** · {item['value']}  \nSaved {item['created_at']}")
+            if col2.button("Delete", key=f"delete_memory_{item['key']}"):
+                db.delete_memory(user, item["key"])
+                st.rerun()
             st.info("No saved memories yet. Tell the agent a useful preference or long-term goal to remember.")
         for item in memories:
             col1, col2 = st.columns([5, 1])
